@@ -46,4 +46,130 @@ void func(void) {
 ```
 
 #### 11.1.2 合规的解决方案（getenv()）（未修改环境变量的值）
+如果程序员不打算修改环境变量的值，此合规的解决方案演示了如何对返回值的一份拷贝进行修改：
+```
+#include <stdlib.h>
+#include <string.h>
+void trstr(char *c_str, char orig, char rep) {
+    while (*c_str != '\0') {
+        if (*c_str == orig) {
+            *c_str = rep;
+        }
+        ++c_str;
+    }
+}
 
+void func(void) {
+    const char *env;
+    char *copy_of_env;
+    env = getenv("TEST_ENV");
+    if (env == NULL) {
+        /* Handle error */
+    }
+    copy_of_env = (char *)malloc(strlen(env) + 1);
+    if (copy_of_env == NULL) {
+        /* Handle error */
+    }
+    strcpy(copy_of_env, env);
+    trstr(copy_of_env,'"', '_');
+    /* ... */
+    free(copy_of_env);
+}
+```
+
+#### 11.1.3 合规的解决方案（getenv()）（使用POSIX接口修改环境变量的值）
+如果程序员的意图就是修改环境变脸的值，可以采用此合规的解决方案，它使用POSIX的setenv()和strdup()函数将修改后的字符串存回到环境变量中：
+```
+#include <stdlib.h>
+#include <string.h>
+void trstr(char *c_str, char orig, char rep) {
+    while (*c_str != '\0') {
+        if (*c_str == orig) {
+            *c_str = rep;
+        }
+        ++c_str;
+    }
+}
+
+void func(void) {
+    const char *env;
+    char *copy_of_env;
+
+    env = getenv("TEST_ENV");
+    if (env == NULL) {
+        /* Handle error */
+    }
+
+    copy_of_env = strdup(env);
+    if (copy_of_env == NULL) {
+        /* Handle error */
+    }
+
+    trstr(copy_of_env,'"', '_');
+
+    if (setenv("TEST_ENV", copy_of_env, 1) != 0) {
+        /* Handle error */
+    }
+
+    /* ... */
+    free(copy_of_env);
+}
+```
+
+#### 11.1.4 不合规的代码示例（localconv()）
+在此不合规的代码示例中，直接修改了localeconv()返回的对象：
+```
+#include <locale.h>
+
+void f2(void) {
+    struct lconv *conv = localeconv();
+
+    if ('\0' == conv->decimal_point[0]) {
+        conv->decimal_point = ".";
+    }
+}
+```
+
+#### 11.1.5 合规的解决方案（localeconv()）（拷贝）
+此合规的解决方案修改了localeconv()返回的对象的一份拷贝：
+```
+#include <locale.h>
+#include <stdlib.h>
+#include <string.h>
+
+void f2(void) {
+    const struct lconv *conv = localeconv();
+    if (conv == NULL) {
+        /* Handle error */
+    }
+
+    struct lconv *copy_of_conv = (struct lconv *)malloc(
+        sizeof(struct lconv));
+    if (copy_of_conv == NULL) {
+        /* Handle error */
+    }
+
+    memcpy(copy_of_conv, conv, sizeof(struct lconv));
+
+    if ('\0' == copy_of_conv->decimal_point[0]) {
+        copy_of_conv->decimal_point = ".";
+    }
+    /* ... */
+    free(copy_of_conv);
+}
+```
+
+#### 11.1.6 风险评估
+
+
+
+### 11.2 ENV31-C.在执行了某个可能导致环境变量指针无效的操作之后就不要再依赖于该指针
+有些实现提供了一个不可移植的环境变量指针，该指针在调用main()时有效，但是可能会因为修改环境变量的操作而导致无效。
+
+C语言标准J.5.1小节[ISO/IEC 9899:2011]规定：
+>在托管环境中，main函数接受第三个参数，char *envp[]，指向一个以null终止的字符指针数组，其中的每个指针指向一个字符串，该字符串提供了用于程序本次执行的环境变量的相关信息。
+
+因此，在支持此常见扩展的托管环境下，有可能通过此改良形式的main()来访问环境变量：
+```
+main(int argc, char *argv[], char *envp[]){ /* ... */ }
+```
