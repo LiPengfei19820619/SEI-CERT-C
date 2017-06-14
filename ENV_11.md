@@ -173,3 +173,132 @@ C语言标准J.5.1小节[ISO/IEC 9899:2011]规定：
 ```
 main(int argc, char *argv[], char *envp[]){ /* ... */ }
 ```
+然而，通过任何手段修改环境变量都可能会导致重新分配存放环境变量值的内存，致使envp引用了错误的位置。例如，如果使用GCC 4.8.1编译并运行于32位GNU/Linux机器上，下面的代码，
+```
+#include <stdio.h>
+#include <stdlib.h>
+
+extern char **environ;
+
+int main(int argc, const char *argv[], const char *envp[]) {
+    printf("environ: %p\n", environ);
+    printf("envp:    %p\n", envp);
+    setenv("MY_NEW_VAR", "new_value", 1);
+    puts("--Added MY_NEW_VAR--");
+    printf("environ: %p\n", environ);
+    printf("envp:    %p\n", envp);
+    return 0;
+}
+```
+输出结果如下：
+```
+% ./envp-environ
+environ: 0xbf8656ec
+envp:    0xbf8656ec
+--Added MY_NEW_VAR--
+environ: 0x804a008
+envp:    0xbf8656ec
+```
+从这些结果很明显的看出，由于调用了setenv()，环境变量的存储位置被重新分配了。外部变量environ被更新以引用到当前的环境变量，而envp参数则没有更新。
+
+指向环境变量的指针也可能会由于后续的getenv()调用而失效。（参见ENV34-C.Do not store pointers returned by certain functions。）
+
+#### 11.2.1 不合规的代码示例（POSIX）
+在调用POSIX setenv()函数或者其他的修改环境变量的函数之后，envp指针就有可能不再指向当前的环境变量了。《Portable Operating System Interface(POSIX), Base Specifications Issue 7>>[IEEE Std 1003.1:2013]中规定：
+>如果setenv()修改了外部变量environ，会导致不可预期的结果。特别是，如果main()的可选参数envp存在，该参数不会被修改，所以可能会指向环境变量的一个过时的拷贝（因为environ可能会存在其他的拷贝）。
+
+此不合格的代码示例在调用了setenv()之后访问了envp指针：
+```
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int argc, const char *argv[], const char *envp[]) {
+    if (setenv("MY_NEW_VAR", "new_value", 1) != 0) {
+        /* Handle error */
+    }
+    if (envp != NULL) {
+        for (size_t i = 0; envp[i] != NULL; ++i) {
+            puts(envp[i]);
+        }
+    }
+    return 0;
+}
+```
+
+因为envp可能不再指向当前的环境变量，该程序具有未定义的行为。
+
+#### 11.2.2 合规的解决方案（POSIX）
+如果定义了environ，则使用environ来替换envp：
+```
+#include <stdio.h>
+#include <stdlib.h>
+
+extern char **environ;
+
+int main(void) {
+    if (setenv("MY_NEW_VAR", "new_value", 1) != 0) {
+    /    * Handle error */
+    }
+
+    if (environ != NULL) {
+        for (size_t i = 0; environ[i] != NULL; ++i) {
+            puts(environ[i]);
+        }
+    }
+
+    return 0;
+}
+```
+
+#### 11.2.3 不合规的代码示例（Windows）
+在调用Windows的_putenv_s()函数或者其他的修改环境变量的函数之后，envp指针就可能不再指向环境变量。
+根据Visual C++参考资料[MSDN]：
+>传递到main和wmain的环境变量块是当前环境变量的一份“冻结的”拷贝。如果你后续通过调用_putenv或者_wputenv来修改环境变量，当前的环境变量（由getenv/_wgetenv函数返回的值以及_environ/_wenviron变量的值）会发生改变，但是envp指向的内存块的内容则不会发生变化。
+
+此不合规的代码示例在调用_putenv_s()之后访问envp指针：
+```
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int argc, const char *argv[], const char *envp[]) {
+    if (_putenv_s("MY_NEW_VAR", "new_value") != 0) {
+        /* Handle error */
+    }
+
+    if (envp != NULL) {
+        for (size_t i = 0; envp[i] != NULL; ++i) {
+            puts(envp[i]);
+        }
+    }
+
+    return 0;
+}
+```
+
+因为envp不再指向当前的环境变量，该程序具有未定义的行为。
+
+#### 11.2.4 合规的解决方案（Windows）
+此合规的解决方案使用_environ变量来代替envp：
+```
+#include <stdio.h>
+#include <stdlib.h>
+
+_CRTIMP extern char **_environ;
+
+int main(int argc, const char *argv[]) {
+    if (_putenv_s("MY_NEW_VAR", "new_value") != 0) {
+        /* Handle error */
+    }
+
+    if (_environ != NULL) {
+        for (size_t i = 0; _environ[i] != NULL; ++i) {
+            puts(_environ[i]);
+        }
+    }
+
+    return 0;
+}
+```
+
+#### 11.2.5 合规的解决方案
+
