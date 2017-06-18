@@ -301,4 +301,32 @@ int main(int argc, const char *argv[]) {
 ```
 
 #### 11.2.5 合规的解决方案
+在存在大量的不合规的envp代码时，本合规的解决方案可以减少补救所需的时间。它将
+```
+int main(int argc, char *argv[], char *envp[]) {
+    /* ... */
+}
+```
+替换为
+```
+#if defined (_POSIX_) || defined (__USE_POSIX)
+    extern char **environ;
+    #define envp environ
+#elif defined(_WIN32)
+    _CRTIMP extern char **_environ;
+    #define envp _environ
+#endif
+
+int main(int argc, char *argv[]) {
+    /* ... */
+}
+```
+
+此合规的解决方案可能需要进行扩展，以支持其他形式的外部变量environ的实现。
+
+#### 11.2.6 风险评估
+
+
+### 11.3 所有的退出处理程序必须正常返回
+C语言标准提供了3个导致应用程序正常终止的函数：_Exit()，exit()，以及quick_exit()。这些函数统称为退出函数。在调用exit()函数，或者控制流程转移到main()入口点函数之外时，会调用由atexit()（而不是at_quick_exit()）所注册的函数。在调用quick_exit()函数时，会调用由at_quick_exit()（而不是atexit)所注册的函数。这些函数统称为退出处理程序。在调用_Exit()函数时，不会调用退出处理程序或者信号处理程序。
 
