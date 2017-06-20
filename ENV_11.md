@@ -329,4 +329,122 @@ int main(int argc, char *argv[]) {
 
 ### 11.3 所有的退出处理程序必须正常返回
 C语言标准提供了3个导致应用程序正常终止的函数：_Exit()，exit()，以及quick_exit()。这些函数统称为退出函数。在调用exit()函数，或者控制流程转移到main()入口点函数之外时，会调用由atexit()（而不是at_quick_exit()）所注册的函数。在调用quick_exit()函数时，会调用由at_quick_exit()（而不是atexit)所注册的函数。这些函数统称为退出处理程序。在调用_Exit()函数时，不会调用退出处理程序或者信号处理程序。
+退出处理程序必须通过返回来进行终止。对于所有的退出处理程序来说，能够执行他们的清理操作，是很重要的，同时在潜在的安全性方面也是非常关键的。而由于应用程序开发人员并不总是了解由支持库所安装的处理程序，这一点就变得尤其重要了。这方面有两个特定的问题，包括嵌套调用退出函数，和通过调用longjmp来终止退出处理程序的调用。
+嵌套调用退出处理函数是未定义的行为。（参见undefined behavior 182。）这种行为只可能发生在从退出处理程序中调用退出函数，或者在信号处理程序中调用退出函数。（参见SIG30-C. Call only asynchronous-safe functions within signal handlers。）
+如果longjmp()函数的调用，将会终止由atexit()注册的函数的调用，则该行为是未定义的。
+
+#### 11.3.1 不合规的代码示例
+在该不合规的代码示例中，通过atexit()注册了exit1()和exit2()函数，以在程序终止时执行所需的清理操作。然而，如果some_condition运算的结果为真，exit()会被二次调用，产生未定义的行为。
+
+```
+#include <stdlib.h>
+
+void exit1(void) {
+    /* ... Cleanup code ... */
+    return;
+}
+
+void exit2(void) {
+    extern int some_condition;
+    if (some_condition) {
+        /* ... More cleanup code ... */
+        exit(0);
+    }
+    return;
+}
+
+int main(void) {
+    if (atexit(exit1) != 0) {
+        /* Handle error */
+    }
+    if (atexit(exit2) != 0) {
+        /* Handle error */
+    }
+    /* ... Program code ... */
+    return 0;
+}
+```
+通过atexit()函数注册的函数，会以注册时的顺序相反的次序进行调用。因此，如果exit2()通过除返回之外的任何方式退出，exit1()就不会被执行。由支持库安装的atexit()处理程序同样如此。
+
+#### 11.3.2 合规的解决方案
+通过atexit()注册为退出处理程序的函数必须以返回的方式退出，如下面的合规解决方案：
+```
+#include <stdlib.h>
+
+void exit1(void) {
+    /* ... Cleanup code ... */
+    return;
+}
+
+void exit2(void) {
+    extern int some_condition;
+    if (some_condition) {
+        /* ... More cleanup code ... */
+    }
+    return;
+}
+
+int main(void) {
+    if (atexit(exit1) != 0) {
+        /* Handle error */
+    }
+    if (atexit(exit2) != 0) {
+        /* Handle error */
+    }
+    /* ... Program code ... */
+    return 0;
+}
+```
+
+#### 11.3.3 不合规的代码示例
+在该不合规的代码示例中，通过atexit()注册了exit1()，所以在程序终止时会调用exit1()。而exit1()函数跳转回到main()来返回，产生了未定义的结果。
+```
+#include <stdlib.h>
+#include <setjmp.h>
+
+jmp_buf env;
+int val;
+
+void exit1(void) {
+    longjmp(env, 1);
+}
+
+int main(void) {
+    if (atexit(exit1) != 0) {
+        /* Handle error */
+    }
+    if (setjmp(env) == 0) {
+        exit(0);
+    } else {
+        return 0;
+    }
+}
+```
+
+#### 11.3.4 合规的解决方案
+本合规的解决方案没有调用longjmp()，而是从退出处理程序中正常返回：
+```
+#include <stdlib.h>
+
+void exit1(void) {
+    return;
+}
+
+int main(void) {
+    if (atexit(exit1) != 0) {
+        /* Handle error */
+    }
+    return 0;
+}
+```
+
+#### 11.3.5 风险评估
+
+
+### 11.4 不要调用system()
+C语言标准system()函数通过调用实现定义的命令处理器来执行一个指定的命令，例如UNIX的shell，或者Microsoft Windows下的CMD.EXE。POSIX的popen()和Windows的_popen()函数同样调用命令处理器，但是会在调用程序和被执行的命令之间创建一个管道，并返回一个指向流的指针，该指针可用于从管道中读取数据或者向管道写入数据[IEEE Std 1003.1:2013]。
+
+使用system()函数可能会导致可被利用的漏洞，最坏的情况是允许执行任意的系统命令。
+调用system()具有高风险的场景如下：
+
 
