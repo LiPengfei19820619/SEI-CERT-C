@@ -237,7 +237,7 @@ extern char **environ;
 
 int main(void) {
     if (setenv("MY_NEW_VAR", "new_value", 1) != 0) {
-    /    * Handle error */
+        /* Handle error */
     }
 
     if (environ != NULL) {
@@ -446,5 +446,431 @@ C语言标准system()函数通过调用实现定义的命令处理器来执行�
 
 使用system()函数可能会导致可被利用的漏洞，最坏的情况是允许执行任意的系统命令。
 调用system()具有高风险的场景如下：
+* 传递的命令字符串来自于受污染的源，而该字符串没有经过合法性检查或者检查不当
+* 命令没有指定路径名称，而攻击者可以访问命令处理器路径名称解析机制
+* 指定了可执行程序的相对路径，而攻击者有当前工作目录的控制权限
+* 攻击者可以伪造指定的可执行程序
 
+不要通过system()或其他类似的函数来调用命令处理器执行命令。
+
+#### 10.4.1 不合规的代码示例
+在此不合规的代码示例中，使用了system()函数在主机环境中执行any_cmd。调用命令处理器不是必需的。
+```
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+enum { BUFFERSIZE = 512 };
+
+void func(const char *input) {
+    char cmdbuf[BUFFERSIZE];
+    int len_wanted = snprintf(cmdbuf, BUFFERSIZE,
+                              "any_cmd '%s'", input);
+    if (len_wanted >= BUFFERSIZE) {
+        /* Handle error */
+    } else if (len_wanted < 0) {
+        /* Handle error */
+    } else if (system(cmdbuf) == -1) {
+        /* Handle error */
+    }
+}
+```
+
+如果此段代码在Linux系统上编译，并以提升后的权限进行运行，则攻击者可以通过输入下面的字符串来创建一个账户：
+```
+happy'; useradd 'attacker
+```
+shell会将上面的字符串解释为两条单独的命令：
+```
+any_cmd 'happy';
+useradd 'attacker'
+```
+并创建一个新的用户账户，攻击者可以使用此账户来访问被入侵的系统。
+此不合规的代码示例同时也违背了 STR02-C. Sanitize data passed to complex subsystems。
+
+#### 11.4.2 合规的解决方案（POSIX)
+在此合规的解决方案中，用execve()调用来替换system()调用。exec函数系列不使用完整的shell解释器，所以不容易遭受命令行注入攻击，诸如不合规的代码示例中所展示的情况。<br>
+如果指定的文件名称不包含正斜杠字符（/），execlp()，execvp()，以及（非标准的）execvP()函数会按照与shell完全相同的操作方式来搜索可行性文件。因此，正如in ENV03-C. Sanitize the environment when invoking external programs中所描述，只有在PATH环境变量被设置为一个安全的值时，它们才能在没有正斜杠字符（/）的情况下使用。<br>
+execl()，execle()，execv()，以及execve()函数不会执行路径名称替换操作。<br>
+此外，需要小心的是，确保外部可执行程序不会被非信任用户修改，比如说，确保可执行程序对于此用户来说没有写入权限。
+
+```
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <errno.h>
+#include <stdlib.h>
+
+void func(char *input) {
+    pid_t pid;
+    int status;
+    pid_t ret;
+    char *const args[3] = {"any_exe", input, NULL};
+    char **env;
+
+    extern char **environ;
+
+    /* ... Sanitize arguments ... */
+    pid = fork();
+    if (pid == -1) {
+        /* Handle error */
+    } else if (pid != 0) {
+        while ((ret = waitpid(pid, &status, 0)) == -1) {
+            if (errno != EINTR) {
+                /* Handle error */
+                break;
+            }
+        }
+        if ((ret != -1) &&
+            (!WIFEXITED(status) || !WEXITSTATUS(status)) ) {
+                /* Report unexpected child status */
+        }
+    } else {
+        /* ... Initialize env as a sanitized copy of environ ... */
+        if (execve("/usr/bin/any_cmd", args, env) == -1) {
+            /* Handle error */
+            _Exit(127);
+        }
+    }
+}
+```
+此合规的解决方案明显不同于前面的不合规代码示例。首先，input被合并到args数组中并作为一个参数传递给execve()，就不需要考虑在格式化命令字符串时遇到的缓冲区溢出或者字符串截断的问题了。其次，该合规解决方案先创建了一个新的进程，然后在子进程中执行"/usr/bin/any_cmd"。尽管这种方法比调用system()要复杂很多，但为了获得加强的安全性，付出的这些额外的工作是值得的。<br>
+在未找到命令时，shell会将退出状态的值设置为127，并且POSIX建议应用程序也应该采用同样的做法。XCU, Section 2.8.2, of Standard for Information
+Technology—Portable Operating System Interface (POSIX®), Base Specifications, Issue 7 [IEEE
+Std 1003.1:2013],指出
+>如果命令没有找到，退出状态应该为127。如果命令名称找到了，但不是一个可执行的实用程序，退出状态应该为126。使用shell来调用实用程序的应用程序应该使用这些退出状态值来报告类似的错误。
+
+#### 11.4.3 合规的解决方案（Windows）
+本合规的解决方案采用Microsoft Windows的CreateProcess() API:
+```
+#include <Windows.h>
+
+void func(TCHAR *input) {
+    STARTUPINFO si = { 0 };
+    PROCESS_INFORMATION pi;
+
+    si.cb = sizeof(si);
+    if (!CreateProcess(TEXT("any_cmd.exe"), input, NULL, NULL, FALSE,
+                       0, 0, 0, &si, &pi)) {
+        /* Handle error */
+    }
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+}
+```
+此合规的解决方案依赖于input参数为非const值。如果input为const，该解决方案就需要创建此参数的一个拷贝，因为CreateProcess()函数可能会修改传递给新创建进程的命令行参数。<br>
+本解决方案创建的进程，子进程不会继承父进程的任何句柄，遵循 WIN03-C. Understand HANDLE inheritance。
+
+#### 11.4.4 不合规的代码示例（POSIX）
+此不合规的代码调用C语言system()函数来删除用户主文件夹中的.config文件。
+```
+#include <stdlib.h>
+
+void func(void) {
+    system("rm ~/.config");
+}
+```
+如果此易受攻击的程序具有提升的执行权限，则攻击者就可以通过操纵HOME环境变量的值来删除系统中任何位置的任何一个名为.config的文件。
+
+#### 11.4.5 合规的解决方案（POSIX）
+调用system()来执行外部程序进行必须的操作的一种替代方式是，使用现有的库接口调用在程序中直接实现其功能。此合规的解决方案调用POSIX unlink()函数删除一个文件，没有调用system()函数[IEEE Std 1003.1:2013]：
+```
+#include <pwd.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+void func(void) {
+    const char *file_format = "%s/.config";
+    size_t len;
+    char *pathname;
+    struct passwd *pwd;
+
+    /* Get /etc/passwd entry for current user */
+    pwd = getpwuid(getuid());
+    if (pwd == NULL) {
+        /* Handle error */
+    }
+
+    /* Build full path name home dir from pw entry */
+
+    len = strlen(pwd->pw_dir) + strlen(file_format) + 1;
+    pathname = (char *)malloc(len);
+    if (NULL == pathname) {
+        /* Handle error */
+    }
+    int r = snprintf(pathname, len, file_format, pwd->pw_dir);
+    if (r < 0 || r >= len) {
+        /* Handle error */
+    }
+    if (unlink(pathname) != 0) {
+        /* Handle error */
+    }
+
+    free(pathname);
+}
+```
+在pathname(文件名称)的最后一部分为符号链接的情况下，unlink()函数也不容易遭受到符号链接攻击，因为unlink()会删除符号链接，同时不会影响任何以符号链接内容命名的文件或者目录。（参见 FIO01-C. Be careful using functions that use file names for identification。）虽然unlink()函数降低了受攻击的可能性，但无法完全避免。如果包含在pathname中的一个目录名称为符号链接，unlink()函数仍然可能遭受到攻击。这种情况可能会导致unlink()函数删除另外一个文件夹中的同名文件。
+
+#### 11.4.6 合规的解决方案（Windows）
+此合规的解决方案采用Microsoft Windows的 SHGetKnownFolderPath() API来获取当前用户的“我的文档”文件夹，然后将其与文件名组合以产生待删除文件的路径。然后使用DeleteFile() API来删除该文件。
+```
+#include <Windows.h>
+#include <ShlObj.h>
+#include <Shlwapi.h>
+
+#if defined(_MSC_VER)
+#pragma comment(lib, "Shlwapi")
+#endif
+
+void func(void) {
+    HRESULT hr;
+    LPWSTR path = 0;
+    WCHAR full_path[MAX_PATH];
+
+    hr = SHGetKnownFolderPath(&FOLDERID_Documents, 0, NULL, &path);
+    if (FAILED(hr)) {
+        /* Handle error */
+    }
+    if (!PathCombineW(full_path, path, L".config")) {
+        /* Handle error */
+    }
+    CoTaskMemFree(path);
+    if (!DeleteFileW(full_path)) {
+        /* Handle error */
+    }
+}
+```
+
+#### 11.4.7 例外情况
+ENV33-C-EX1：允许使用一个空指针参数来调用system()以判断用于该系统的命令处理程序是否存在。
+
+#### 11.4.8 风险评估
+
+
+### 11.5 ENV34-C. 不要保存某些函数返回的指针
+C语言标准，7.22.4.6小节，第4段 [ISO/IEC 9899:2011]规定：
+>getenv函数返回一个指向字符串的指针，该字符串与匹配的列表成员相关。程序不要修改所指向的字符串，该字符串可能会被后续的getenv函数调用所覆盖。
+
+此段规定给具体实现提供了余地，比如说，可以返回一个指向静态分配的缓冲区的指针。因此，不要保存此指针，因为它指向的字符串数据可能会被下一次调用getenv()函数所覆盖，或者会由于修改了环境变量而失效。该字符串应该立即引用然后丢弃。如果预料到后面还会使用到该字符串，应该就其拷贝下来，使得在需要的时候可以安全的应用该拷贝。<br>
+getenv()函数不是线程安全的。务必处理好使用此函数所带来的任何竞争条件。<br>
+asctime()，localconv()，setlocale()，以及strerror()函数具有类似的限制。在后续的调用之后，就不要再访问前一次调用所返回的对象了。
+
+#### 11.5.1 不合规的代码示例
+此不合规的代码示例试图比较TMP和TEMP环境变量的值是否相同：
+```
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+void func(void) {
+    char *tmpvar;
+    char *tempvar;
+    tmpvar = getenv("TMP");
+    if (!tmpvar) {
+        /* Handle error */
+    }
+    tempvar = getenv("TEMP");
+    if (!tempvar) {
+        /* Handle error */
+    }
+    if (strcmp(tmpvar, tempvar) == 0) {
+        printf("TMP and TEMP are the same.\n");
+    } else {
+        printf("TMP and TEMP are NOT the same.\n");
+    }
+}
+```
+此代码示例不合规是因为tmpvar所引用的字符串可能会被覆盖为第二次调用getenv()函数所得到的结果。因此，即使这两个环境变量的值不同，但tmpvar和tempvar比较得到的结果仍然可能是相等的。<br>
+
+#### 11.5.2 合规的解决方案
+此合规的解决方案使用malloc()和strcpy()函数将getenv()返回的字符串拷贝到一个动态分配的缓冲区中：
+```
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+void func(void) {
+    char *tmpvar;
+    char *tempvar;
+
+    const char *temp = getenv("TMP");
+    if (temp != NULL) {
+        tmpvar = (char *)malloc(strlen(temp)+1);
+        if (tmpvar != NULL) {
+            strcpy(tmpvar, temp);
+        } else {
+            /* Handle error */
+        }
+    } else {
+        /* Handle error */
+    }
+
+    temp = getenv("TEMP");
+    if (temp != NULL) {
+        tempvar = (char *)malloc(strlen(temp)+1);
+        if (tempvar != NULL) {
+            strcpy(tempvar, temp);
+        } else {
+            /* Handle error */
+        }
+    } else {
+        /* Handle error */
+    }
+
+    if (strcmp(tmpvar, tempvar) == 0) {
+        printf("TMP and TEMP are the same.\n");
+    } else {
+        printf("TMP and TEMP are NOT the same.\n");
+    }
+
+    free(tmpvar);
+    free(tempvar);
+}
+```
+
+#### 11.5.3 合规的解决方案（Annex K）
+C语言标准，Annex K，提供了getenv_s()函数用于从当前的环境中获取一个值。然而，getenv_s()函数仍然可能会与修改环境变量列表的其他线程执行存在着数据竞争。
+```
+#define __STDC_WANT_LIB_EXT1__ 1
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+void func(void) {
+    char *tmpvar;
+    char *tempvar;
+    size_t requiredSize;
+    errno_t err;
+
+    err = getenv_s(&requiredSize, NULL, 0, "TMP");
+    if (err) {
+        /* Handle error */
+    }
+    tmpvar = (char *)malloc(requiredSize);
+    if (!tmpvar) {
+        /* Handle error */
+    }
+
+    err = getenv_s(&requiredSize, tmpvar, requiredSize, "TMP" );
+    if (err) {
+        /* Handle error */
+    }
+
+    err = getenv_s(&requiredSize, NULL, 0, "TEMP");
+    if (err) {
+        /* Handle error */
+    }
+    tempvar = (char *)malloc(requiredSize);
+    if (!tempvar) {
+        /* Handle error */
+    }
+    err = getenv_s(&requiredSize, tempvar, requiredSize, "TEMP" );
+    if (err) {
+        /* Handle error */
+    }
+
+    if (strcmp(tmpvar, tempvar) == 0) {
+        printf("TMP and TEMP are the same.\n");
+    } else {
+        printf("TMP and TEMP are NOT the same.\n");
+    }
+
+    free(tmpvar);
+    tmpvar = NULL;
+    free(tempvar);
+    tempvar = NULL;
+}
+```
+
+#### 11.5.4 合规的解决方案（Windows）
+Microsoft Windows提供了_dupenv_s()和wdupenv_s()函数用于从当前的环境变量中获取某一个值【MSDN】。_dupenv_s()函数用指定的环境变量名称查找环境变量列表。如果找到了该名称，则分配一个缓冲区，将变量的值拷贝到缓冲区中，然后将缓冲区的地址和元素的个数返回。_dupenv_s()和_wdupenv_s()函数为getenv_s()和_wgetenv_s()提供了更加方便的替代手段，因为他们直接处理了缓冲区的分配。<br>
+调用者负责调用free()，来释放由这些函数所返回的任何已分配缓冲区。
+```
+#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+#include <stdio.h>
+
+void func(void) {
+    char *tmpvar;
+    char *tempvar;
+    size_t len;
+
+    errno_t err = _dupenv_s(&tmpvar, &len, "TMP");
+    if (err) {
+        /* Handle error */
+    }
+
+    err = _dupenv_s(&tempvar, &len, "TEMP");
+    if (err) {
+        /* Handle error */
+    }
+
+    if (strcmp(tmpvar, tempvar) == 0) {
+        printf("TMP and TEMP are the same.\n");
+    } else {
+        printf("TMP and TEMP are NOT the same.\n");
+    }
+
+    free(tmpvar);
+    tmpvar = NULL;
+    free(tempvar);
+    tempvar = NULL;
+}
+```
+
+#### 11.5.5 合规的解决方案（POSIX）
+POSIX提供了strdup()函数，该函数可以创建环境变量字符串的一份拷贝 [IEEE Std 1003.1:2013]。《Extensions to the C Library—Part II 》 [ISO/IEC TR 24731-2:2010]中也同样包含了strdup()函数。
+```
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+void func(void) {
+    char *tmpvar;
+    char *tempvar;
+
+    const char *temp = getenv("TMP");
+    if (temp != NULL) {
+        tmpvar = strdup(temp);
+        if (tmpvar == NULL) {
+            /* Handle error */
+        }
+    } else {
+        /* Handle error */
+    }
+
+    temp = getenv("TEMP");
+    if (temp != NULL) {
+        tempvar = strdup(temp);
+        if (tempvar == NULL) {
+            /* Handle error */
+        }
+    } else {
+        /* Handle error */
+    }
+
+    if (strcmp(tmpvar, tempvar) == 0) {
+        printf("TMP and TEMP are the same.\n");
+    } else {
+        printf("TMP and TEMP are NOT the same.\n");
+    }
+
+    free(tmpvar);
+    tmpvar = NULL;
+    free(tempvar);
+    tempvar = NULL;
+}
+```
+
+#### 11.5.6 风险评估
+保存getenv()，loacalenv()，setlocale()，或strerror()返回的字符串指针可能会导致数据被覆盖。
+
+|规则|严重性|可能性|修补成本|优先级|级别|
+|---|---|---|---|---|---|
+|ENV34-C|低|可能|中|P4|L3|
 
